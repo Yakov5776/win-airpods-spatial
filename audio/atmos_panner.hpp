@@ -37,9 +37,21 @@ public:
         const CavernObjectBlock& block,
         float listenerYawDegrees,
         float listenerPitchDegrees,
+        float listenerRollDegrees,
         float* outputLeft,
         float* outputRight,
         std::size_t outputCapacity);
+
+    void Process(
+        const CavernObjectBlock& block,
+        float listenerYawDegrees,
+        float listenerPitchDegrees,
+        float* outputLeft,
+        float* outputRight,
+        std::size_t outputCapacity)
+    {
+        Process(block, listenerYawDegrees, listenerPitchDegrees, 0.0f, outputLeft, outputRight, outputCapacity);
+    }
 
 private:
     AtmosPannerSettings settings_;

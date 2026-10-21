@@ -456,26 +456,49 @@ struct Spatializer::Impl final
         }
     }
 
-    void UpdateFilters(float yaw, float pitch, float stageWidth, float smoothing)
+    void UpdateFilters(float yaw, float pitch, float roll, float stageWidth, float smoothing)
     {
         targetFilters = {};
         targetTapCount = 0;
         const float halfWidth = stageWidth * 0.5f;
-        const float elevation = std::clamp(-pitch, -45.0f, 45.0f) * kPi / 180.0f;
         const float radius = kMetersPerSofaRadius;
-        const float radiusAtElevation = radius * std::cos(elevation);
 
-        if (activeProfile)
+        const float yawRad = yaw * kPi / 180.0f;
+        const float pitchRad = std::clamp(-pitch, -45.0f, 45.0f) * kPi / 180.0f;
+        const float rollRad = std::clamp(-roll, -60.0f, 60.0f) * kPi / 180.0f;
+
+        const float cosYaw = std::cos(yawRad), sinYaw = std::sin(yawRad);
+        const float cosPitch = std::cos(pitchRad), sinPitch = std::sin(pitchRad);
+        const float cosRoll = std::cos(rollRad), sinRoll = std::sin(rollRad);
+
+        for (std::size_t source = 0; source < 2; source++)
         {
-            for (std::size_t source = 0; source < 2; source++)
-            {
-                const float azimuthDegrees = (source == 0 ? halfWidth : -halfWidth) + yaw;
-                const float azimuth = azimuthDegrees * kPi / 180.0f;
-                const float position[3]{
-                    radiusAtElevation * std::cos(azimuth),
-                    radiusAtElevation * std::sin(azimuth),
-                    radius * std::sin(elevation)};
+            const float azimuthDegrees = (source == 0 ? halfWidth : -halfWidth);
+            const float azRad = azimuthDegrees * kPi / 180.0f;
 
+            const float x0 = radius * std::cos(azRad);
+            const float y0 = radius * std::sin(azRad);
+            const float z0 = 0.0f;
+
+            // 1. Yaw rotation around Z (up)
+            const float x1 = x0 * cosYaw + y0 * sinYaw;
+            const float y1 = -x0 * sinYaw + y0 * cosYaw;
+            const float z1 = z0;
+
+            // 2. Pitch rotation around Y (lateral)
+            const float x2 = x1 * cosPitch + z1 * sinPitch;
+            const float y2 = y1;
+            const float z2 = -x1 * sinPitch + z1 * cosPitch;
+
+            // 3. Roll rotation around X (forward)
+            const float x3 = x2;
+            const float y3 = y2 * cosRoll - z2 * sinRoll;
+            const float z3 = y2 * sinRoll + z2 * cosRoll;
+
+            const float position[3]{ x3, y3, z3 };
+
+            if (activeProfile)
+            {
                 std::array<float, kMaximumHrtfTaps> leftFilt{};
                 std::array<float, kMaximumHrtfTaps> rightFilt{};
                 std::size_t taps = 0;
@@ -490,18 +513,9 @@ struct Spatializer::Impl final
                     targetTapCount = std::max(targetTapCount, taps);
                 }
             }
-        }
-        else if (hrtf)
-        {
-            std::lock_guard queryLock(hrtf->queryMutex);
-            for (std::size_t source = 0; source < 2; source++)
+            else if (hrtf)
             {
-                const float azimuthDegrees = (source == 0 ? halfWidth : -halfWidth) + yaw;
-                const float azimuth = azimuthDegrees * kPi / 180.0f;
-                const float position[3]{
-                    radiusAtElevation * std::cos(azimuth),
-                    radiusAtElevation * std::sin(azimuth),
-                    radius * std::sin(elevation)};
+                std::lock_guard queryLock(hrtf->queryMutex);
                 std::array<float, kMaximumHrtfTaps> rawLeft{};
                 std::array<float, kMaximumHrtfTaps> rawRight{};
                 float delayLeft = 0.0f;
@@ -585,6 +599,7 @@ struct Spatializer::Impl final
             room.Reset();
             smoothedYaw = 0.0f;
             smoothedPitch = 0.0f;
+            smoothedRoll = 0.0f;
             activeMode = requested;
         }
 
@@ -607,13 +622,18 @@ struct Spatializer::Impl final
         const float targetPitch = activeMode == Mode::Tracked
             ? requestedPitch.load(std::memory_order_relaxed)
             : 0.0f;
+        const float targetRoll = activeMode == Mode::Tracked
+            ? requestedRoll.load(std::memory_order_relaxed)
+            : 0.0f;
         const float blockSeconds = static_cast<float>(frameCount) / sampleRate;
         const float smoothing = 1.0f - std::exp(-blockSeconds / 0.020f);
         smoothedYaw += WrapDegrees(targetYaw - smoothedYaw) * smoothing;
         smoothedPitch += (targetPitch - smoothedPitch) * smoothing;
+        smoothedRoll += (targetRoll - smoothedRoll) * smoothing;
         UpdateFilters(
             smoothedYaw,
             smoothedPitch,
+            smoothedRoll,
             requestedStageWidth.load(std::memory_order_relaxed),
             smoothing);
 
@@ -657,12 +677,14 @@ struct Spatializer::Impl final
     std::atomic<bool> resetRequested{false};
     std::atomic<float> requestedYaw{0.0f};
     std::atomic<float> requestedPitch{0.0f};
+    std::atomic<float> requestedRoll{0.0f};
     std::atomic<float> requestedStageWidth{68.0f};
     std::atomic<float> requestedRoomReflection{0.08f};
     std::atomic<float> requestedHrtfBlend{0.85f};
     Mode activeMode = Mode::Off;
     float smoothedYaw = 0.0f;
     float smoothedPitch = 0.0f;
+    float smoothedRoll = 0.0f;
     std::array<std::array<float, kMaximumHrtfTaps>, 2> inputHistory{};
     std::array<std::array<float, kMaximumHrtfTaps>, 4> currentFilters{};
     std::array<std::array<float, kMaximumHrtfTaps>, 4> targetFilters{};
@@ -692,8 +714,12 @@ void Spatializer::SetPose(Pose pose)
     const float pitch = std::isfinite(pose.pitchDegrees)
         ? std::clamp(pose.pitchDegrees, -45.0f, 45.0f)
         : 0.0f;
+    const float roll = std::isfinite(pose.rollDegrees)
+        ? std::clamp(pose.rollDegrees, -60.0f, 60.0f)
+        : 0.0f;
     impl_->requestedYaw.store(yaw, std::memory_order_relaxed);
     impl_->requestedPitch.store(pitch, std::memory_order_relaxed);
+    impl_->requestedRoll.store(roll, std::memory_order_relaxed);
 }
 
 void Spatializer::SetStageWidth(float degrees)

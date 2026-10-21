@@ -23,6 +23,34 @@ float SoftLimit(float value)
     const float limited = 0.85f + 0.15f * std::tanh((magnitude - 0.85f) / 0.15f);
     return std::copysign(limited, value);
 }
+
+struct Vec3
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+inline Vec3 RotateYPR(const Vec3& v, float yawRad, float pitchRad, float rollRad)
+{
+    const float cosYaw = std::cos(yawRad), sinYaw = std::sin(yawRad);
+    const float cosPitch = std::cos(pitchRad), sinPitch = std::sin(pitchRad);
+    const float cosRoll = std::cos(rollRad), sinRoll = std::sin(rollRad);
+
+    const float x1 = v.x * cosYaw + v.y * sinYaw;
+    const float y1 = -v.x * sinYaw + v.y * cosYaw;
+    const float z1 = v.z;
+
+    const float x2 = x1 * cosPitch + z1 * sinPitch;
+    const float y2 = y1;
+    const float z2 = -x1 * sinPitch + z1 * cosPitch;
+
+    const float x3 = x2;
+    const float y3 = y2 * cosRoll - z2 * sinRoll;
+    const float z3 = y2 * sinRoll + z2 * cosRoll;
+
+    return { x3, y3, z3 };
+}
 }
 
 AtmosPanner::AtmosPanner(AtmosPannerSettings settings)
@@ -61,6 +89,7 @@ void AtmosPanner::Process(
     const CavernObjectBlock& block,
     float listenerYawDegrees,
     float listenerPitchDegrees,
+    float listenerRollDegrees,
     float* outputLeft,
     float* outputRight,
     std::size_t outputCapacity)
@@ -75,9 +104,11 @@ void AtmosPanner::Process(
     const auto frameCount = static_cast<std::size_t>(block.frameCount);
     const float yaw = std::isfinite(listenerYawDegrees) ? listenerYawDegrees : 0.0f;
     const float pitch = std::isfinite(listenerPitchDegrees) ? listenerPitchDegrees : 0.0f;
-    const float pitchRadians = pitch * kRadiansPerDegree;
-    const float cosPitch = std::cos(pitchRadians);
-    const float sinPitch = std::sin(pitchRadians);
+    const float roll = std::isfinite(listenerRollDegrees) ? listenerRollDegrees : 0.0f;
+
+    const float yawRad = -yaw * kRadiansPerDegree;
+    const float pitchRad = -pitch * kRadiansPerDegree;
+    const float rollRad = -roll * kRadiansPerDegree;
 
     const bool useHrtf = (hrtfProfile_ != nullptr && hrtfBlend_ > 0.001f);
 
@@ -112,18 +143,15 @@ void AtmosPanner::Process(
                 continue;
             }
 
-            const float x = object.x;
-            const float y = object.y;
-            const float z = object.z;
-            const float relativeYaw = lockMode == ObjectLockMode::WorldLocked ? -yaw : 0.0f;
-            const float yawRadians = relativeYaw * kRadiansPerDegree;
-            const float rotatedX = (std::cos(yawRadians) * x + std::sin(yawRadians) * z) * settings_.objectWidth;
-            const float rotatedZ = (-std::sin(yawRadians) * x + std::cos(yawRadians) * z);
-            const float rotatedY = y * cosPitch - rotatedZ * sinPitch;
-            const float depth = std::max(0.25f, std::sqrt(rotatedX * rotatedX + rotatedY * rotatedY + rotatedZ * rotatedZ));
-            const float azimuth = std::atan2(rotatedX, std::max(0.001f, rotatedZ));
+            const Vec3 basePos{ object.z, -object.x * settings_.objectWidth, object.y };
+            const Vec3 rot = (lockMode == ObjectLockMode::WorldLocked)
+                ? RotateYPR(basePos, yawRad, pitchRad, rollRad)
+                : basePos;
+
+            const float depth = std::max(0.25f, std::sqrt(rot.x * rot.x + rot.y * rot.y + rot.z * rot.z));
+            const float azimuth = std::atan2(-rot.y, std::max(0.001f, rot.x));
             const float side = std::sin(azimuth);
-            const float elevation = std::clamp(rotatedY / depth, -1.0f, 1.0f);
+            const float elevation = std::clamp(rot.z / depth, -1.0f, 1.0f);
             const float distanceGain = 1.0f / (1.0f + 0.12f * std::max(0.0f, depth - 1.0f));
             const float elevationGain = 1.0f - std::abs(elevation) * 0.06f;
             const float leftGain = std::sqrt(std::clamp(0.5f * (1.0f - side), 0.0f, 1.0f)) * distanceGain * elevationGain;
@@ -211,20 +239,17 @@ void AtmosPanner::Process(
         }
         if (maxAmp < 1e-6f) continue;
 
-        const float x = object.x;
-        const float y = object.y;
-        const float z = object.z;
-        const float relativeYaw = lockMode == ObjectLockMode::WorldLocked ? -yaw : 0.0f;
-        const float yawRadians = relativeYaw * kRadiansPerDegree;
-        const float rotatedX = (std::cos(yawRadians) * x + std::sin(yawRadians) * z) * settings_.objectWidth;
-        const float rotatedZ = (-std::sin(yawRadians) * x + std::cos(yawRadians) * z);
-        const float rotatedY = y * cosPitch - rotatedZ * sinPitch;
-        const float depth = std::max(0.25f, std::sqrt(rotatedX * rotatedX + rotatedY * rotatedY + rotatedZ * rotatedZ));
+        const Vec3 basePos{ object.z, -object.x * settings_.objectWidth, object.y };
+        const Vec3 rot = (lockMode == ObjectLockMode::WorldLocked)
+            ? RotateYPR(basePos, yawRad, pitchRad, rollRad)
+            : basePos;
+
+        const float depth = std::max(0.25f, std::sqrt(rot.x * rot.x + rot.y * rot.y + rot.z * rot.z));
         const float distanceGain = 1.0f / (1.0f + 0.12f * std::max(0.0f, depth - 1.0f));
 
-        float dirX = rotatedZ / depth;
-        float dirY = -rotatedX / depth;
-        float dirZ = rotatedY / depth;
+        const float dirX = rot.x / depth;
+        const float dirY = rot.y / depth;
+        const float dirZ = rot.z / depth;
 
         const float sofaPos[3] = {
             dirX * kMetersPerSofaRadius,
@@ -238,9 +263,9 @@ void AtmosPanner::Process(
                 filterLeft.data(), filterRight.data(),
                 kMaxConvolutionTaps, tapCount) || tapCount == 0)
         {
-            const float azimuth = std::atan2(rotatedX, std::max(0.001f, rotatedZ));
+            const float azimuth = std::atan2(-rot.y, std::max(0.001f, rot.x));
             const float side = std::sin(azimuth);
-            const float elevation = std::clamp(rotatedY / depth, -1.0f, 1.0f);
+            const float elevation = std::clamp(rot.z / depth, -1.0f, 1.0f);
             const float elevationGain = 1.0f - std::abs(elevation) * 0.06f;
             const float leftGain = std::sqrt(std::clamp(0.5f * (1.0f - side), 0.0f, 1.0f)) * distanceGain * elevationGain;
             const float rightGain = std::sqrt(std::clamp(0.5f * (1.0f + side), 0.0f, 1.0f)) * distanceGain * elevationGain;

@@ -457,9 +457,11 @@ void StartPlayback(PlayerWindow& app)
                     {
                         if (pose.calibrated && pose.yawDegrees && pose.pitchDegrees)
                         {
+                            const float roll = pose.rollDegrees ? static_cast<float>(*pose.rollDegrees) : 0.0f;
                             app.player.SetHeadPose(
                                 static_cast<float>(*pose.yawDegrees),
-                                static_cast<float>(*pose.pitchDegrees));
+                                static_cast<float>(*pose.pitchDegrees),
+                                roll);
                             PostMessageW(app.window, kTrackingStatusChanged, 2, 0);
                         }
                         else

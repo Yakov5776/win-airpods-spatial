@@ -31,7 +31,7 @@ struct PlaybackSettings
 class MediaPlayer final
 {
 public:
-    void SetHeadPose(float yawDegrees, float pitchDegrees);
+    void SetHeadPose(float yawDegrees, float pitchDegrees, float rollDegrees = 0.0f);
     void SetHrtfBlend(float amount);
     void SetHrtfProfile(std::shared_ptr<const HrtfProfile> profile);
 
@@ -43,6 +43,7 @@ public:
 private:
     std::atomic<float> yawDegrees_{0.0f};
     std::atomic<float> pitchDegrees_{0.0f};
+    std::atomic<float> rollDegrees_{0.0f};
     std::atomic<float> hrtfBlend_{0.85f};
     std::atomic<std::shared_ptr<const HrtfProfile>> hrtfProfile_{};
 };

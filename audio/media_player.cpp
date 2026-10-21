@@ -40,6 +40,7 @@ public:
         PlaybackSettings settings,
         const std::atomic<float>& yawDegrees,
         const std::atomic<float>& pitchDegrees,
+        const std::atomic<float>& rollDegrees,
         const std::atomic<float>& hrtfBlend,
         const std::atomic<std::shared_ptr<const HrtfProfile>>& hrtfProfile)
         : interleaved_(kCallbackChunkFrames * 4),
@@ -56,6 +57,7 @@ public:
           settings_(settings),
           yawDegrees_(yawDegrees),
           pitchDegrees_(pitchDegrees),
+          rollDegrees_(rollDegrees),
           hrtfBlend_(hrtfBlend),
           hrtfProfile_(hrtfProfile)
     {
@@ -253,7 +255,7 @@ private:
                 spatializer_.SetPose(Pose{
                     ListenerYaw(),
                     pitchDegrees_.load(std::memory_order_relaxed),
-                    0.0f});
+                    rollDegrees_.load(std::memory_order_relaxed)});
             }
 
             auto selectedProfile = hrtfProfile_.load(std::memory_order_relaxed);
@@ -340,6 +342,7 @@ private:
                     currentObjectBlock_,
                     ListenerYaw(),
                     pitchDegrees_.load(std::memory_order_relaxed),
+                    rollDegrees_.load(std::memory_order_relaxed),
                     objectOutputLeft_.data(),
                     objectOutputRight_.data(),
                     objectOutputLeft_.size());
@@ -389,6 +392,7 @@ private:
     PlaybackSettings settings_;
     const std::atomic<float>& yawDegrees_;
     const std::atomic<float>& pitchDegrees_;
+    const std::atomic<float>& rollDegrees_;
     const std::atomic<float>& hrtfBlend_;
     const std::atomic<std::shared_ptr<const HrtfProfile>>& hrtfProfile_;
     std::shared_ptr<const HrtfProfile> activeHrtfProfile_;
@@ -404,6 +408,7 @@ int MediaPlayer::PlayFile(
 {
     yawDegrees_.store(0.0f, std::memory_order_relaxed);
     pitchDegrees_.store(0.0f, std::memory_order_relaxed);
+    rollDegrees_.store(0.0f, std::memory_order_relaxed);
     std::optional<std::filesystem::path> decodedPath;
     if (!settings.cavernAtmosObjects && !UsesMiniaudioDecoder(path, settings.channelBedMode))
     {
@@ -422,7 +427,7 @@ int MediaPlayer::PlayFile(
     const auto& playbackPath = decodedPath ? *decodedPath : path;
     const auto play = [&]() -> int
     {
-        PlaybackSession session(settings, yawDegrees_, pitchDegrees_, hrtfBlend_, hrtfProfile_);
+        PlaybackSession session(settings, yawDegrees_, pitchDegrees_, rollDegrees_, hrtfBlend_, hrtfProfile_);
         auto audioResult = session.Initialize(playbackPath);
         if (audioResult != MA_SUCCESS)
         {
@@ -457,10 +462,11 @@ int MediaPlayer::PlayFile(
     return result;
 }
 
-void MediaPlayer::SetHeadPose(float yawDegrees, float pitchDegrees)
+void MediaPlayer::SetHeadPose(float yawDegrees, float pitchDegrees, float rollDegrees)
 {
     yawDegrees_.store(yawDegrees, std::memory_order_relaxed);
     pitchDegrees_.store(pitchDegrees, std::memory_order_relaxed);
+    rollDegrees_.store(rollDegrees, std::memory_order_relaxed);
 }
 
 void MediaPlayer::SetHrtfBlend(float amount)
