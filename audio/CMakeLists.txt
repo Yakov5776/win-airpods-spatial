@@ -13,6 +13,13 @@ endif()
 function(stage_hrtf_assets target)
 	add_custom_command(TARGET ${target} POST_BUILD
 		COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/assets"
+		COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/assets/apple"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory
+			"${CMAKE_CURRENT_SOURCE_DIR}/assets/apple"
+			"$<TARGET_FILE_DIR:${target}>/assets/apple"
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"${CMAKE_CURRENT_SOURCE_DIR}/assets/apple/HRIR_General.sofa"
+			"$<TARGET_FILE_DIR:${target}>/assets/HRIR_General.sofa"
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different
 			"${CMAKE_CURRENT_SOURCE_DIR}/assets/MIT_KEMAR_normal_pinna.sofa"
 			"$<TARGET_FILE_DIR:${target}>/assets/MIT_KEMAR_normal_pinna.sofa"
@@ -55,6 +62,7 @@ target_include_directories(magic_aap_spatial_core PUBLIC ${CMAKE_CURRENT_SOURCE_
 add_library(magic_aap_spatial_atmos cavern_object_stream.cpp atmos_panner.cpp)
 target_compile_features(magic_aap_spatial_atmos PUBLIC cxx_std_20)
 target_include_directories(magic_aap_spatial_atmos PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(magic_aap_spatial_atmos PUBLIC magic_aap_spatial_dsp)
 
 add_executable(magic_aap_spatial_smoke smoke.cpp)
 target_link_libraries(magic_aap_spatial_smoke PRIVATE magic_aap_spatial_dsp)

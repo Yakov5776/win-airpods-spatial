@@ -31,9 +31,9 @@ namespace
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kMetersPerSofaRadius = 1.4f;
 constexpr float kSpatialGain = 0.84f;
-constexpr std::size_t kMaximumHrtfTaps = 1024;
+constexpr std::size_t kMaximumHrtfTaps = 2048;
 constexpr float kRoomDecaySeconds = 0.38f;
-constexpr const char* kHrtfFilename = "MIT_KEMAR_normal_pinna.sofa";
+constexpr const char* kHrtfFilename = "apple/HRIR_General.sofa";
 
 float WrapDegrees(float value)
 {
@@ -66,18 +66,32 @@ std::filesystem::path FindHrtfFile()
         candidates.emplace_back(overridePath);
     }
 
+    constexpr const char* filenames[] = {
+        "assets/apple/HRIR_General.sofa",
+        "assets/HRIR_General.sofa",
+        "audio/assets/apple/HRIR_General.sofa",
+        "sofa/HRIR_General.sofa",
+        "assets/MIT_KEMAR_normal_pinna.sofa",
+        "audio/assets/MIT_KEMAR_normal_pinna.sofa"
+    };
+
     std::error_code error;
     const auto workingDirectory = std::filesystem::current_path(error);
     if (!error)
     {
-        candidates.push_back(workingDirectory / "assets" / kHrtfFilename);
-        candidates.push_back(workingDirectory / "audio" / "assets" / kHrtfFilename);
+        for (const auto* fn : filenames)
+        {
+            candidates.push_back(workingDirectory / fn);
+        }
     }
 
     const auto executableDirectory = ExecutableDirectory();
     if (!executableDirectory.empty())
     {
-        candidates.push_back(executableDirectory / "assets" / kHrtfFilename);
+        candidates.push_back(executableDirectory / "assets" / "apple" / "HRIR_General.sofa");
+        candidates.push_back(executableDirectory / "assets" / "HRIR_General.sofa");
+        candidates.push_back(executableDirectory / "assets" / "MIT_KEMAR_normal_pinna.sofa");
+        candidates.push_back(executableDirectory / "HRIR_General.sofa");
     }
 
     for (const auto& candidate : candidates)
@@ -347,6 +361,75 @@ const std::filesystem::path& HrtfProfile::Path() const noexcept
     return impl_->path;
 }
 
+bool HrtfProfile::IsBrir() const noexcept
+{
+    if (!impl_) return false;
+    const auto filename = impl_->path.filename().string();
+    return filename.find("BRIR") != std::string::npos;
+}
+
+int HrtfProfile::FilterLength() const noexcept
+{
+    return (impl_ && impl_->hrtf) ? impl_->hrtf->filterLength : 0;
+}
+
+bool HrtfProfile::Evaluate(
+    float x, float y, float z,
+    float* leftFilter, float* rightFilter,
+    std::size_t maxTaps,
+    std::size_t& outTapCount) const
+{
+    outTapCount = 0;
+    if (!impl_ || !impl_->hrtf || !impl_->hrtf->easy ||
+        leftFilter == nullptr || rightFilter == nullptr || maxTaps == 0)
+    {
+        return false;
+    }
+
+    std::fill_n(leftFilter, maxTaps, 0.0f);
+    std::fill_n(rightFilter, maxTaps, 0.0f);
+
+    std::array<float, kMaximumHrtfTaps> rawLeft{};
+    std::array<float, kMaximumHrtfTaps> rawRight{};
+    float delayLeft = 0.0f;
+    float delayRight = 0.0f;
+
+    {
+        std::lock_guard queryLock(impl_->hrtf->queryMutex);
+        mysofa_getfilter_float(
+            impl_->hrtf->easy,
+            x, y, z,
+            rawLeft.data(),
+            rawRight.data(),
+            &delayLeft,
+            &delayRight);
+    }
+
+    const std::array<const float*, 2> raw{{rawLeft.data(), rawRight.data()}};
+    const std::array<float, 2> delays{{delayLeft, delayRight}};
+    std::array<float*, 2> targets{{leftFilter, rightFilter}};
+
+    std::size_t maxTap = 0;
+    for (std::size_t ear = 0; ear < 2; ear++)
+    {
+        const float delaySamples = std::max(0.0f, delays[ear] * impl_->hrtf->sampleRate);
+        const auto integerDelay = static_cast<std::size_t>(delaySamples);
+        const float fraction = delaySamples - static_cast<float>(integerDelay);
+        for (int tap = 0; tap < impl_->hrtf->filterLength; tap++)
+        {
+            const auto destination = static_cast<std::size_t>(tap) + integerDelay;
+            if (destination + 1 >= maxTaps) break;
+            targets[ear][destination] += raw[ear][tap] * (1.0f - fraction);
+            targets[ear][destination + 1] += raw[ear][tap] * fraction;
+        }
+        maxTap = std::max(maxTap,
+            std::min(maxTaps, static_cast<std::size_t>(impl_->hrtf->filterLength) + integerDelay + 1));
+    }
+
+    outTapCount = maxTap;
+    return true;
+}
+
 namespace
 {
 struct HrtfSelection final
@@ -363,7 +446,14 @@ struct Spatializer::Impl final
           room(this->sampleRate)
     {
         const auto path = FindHrtfFile();
-        if (!path.empty()) hrtf = OpenSharedHrtf(path, this->sampleRate);
+        if (!path.empty())
+        {
+            activeProfile = HrtfProfile::Load(path, this->sampleRate);
+            if (activeProfile && activeProfile->impl_)
+            {
+                hrtf = activeProfile->impl_->hrtf;
+            }
+        }
     }
 
     void UpdateFilters(float yaw, float pitch, float stageWidth, float smoothing)
@@ -375,6 +465,33 @@ struct Spatializer::Impl final
         const float radius = kMetersPerSofaRadius;
         const float radiusAtElevation = radius * std::cos(elevation);
 
+        if (activeProfile)
+        {
+            for (std::size_t source = 0; source < 2; source++)
+            {
+                const float azimuthDegrees = (source == 0 ? halfWidth : -halfWidth) + yaw;
+                const float azimuth = azimuthDegrees * kPi / 180.0f;
+                const float position[3]{
+                    radiusAtElevation * std::cos(azimuth),
+                    radiusAtElevation * std::sin(azimuth),
+                    radius * std::sin(elevation)};
+
+                std::array<float, kMaximumHrtfTaps> leftFilt{};
+                std::array<float, kMaximumHrtfTaps> rightFilt{};
+                std::size_t taps = 0;
+                if (activeProfile->Evaluate(
+                        position[0], position[1], position[2],
+                        leftFilt.data(), rightFilt.data(),
+                        kMaximumHrtfTaps, taps))
+                {
+                    const std::size_t baseIdx = source * 2;
+                    std::copy_n(leftFilt.data(), taps, targetFilters[baseIdx].data());
+                    std::copy_n(rightFilt.data(), taps, targetFilters[baseIdx + 1].data());
+                    targetTapCount = std::max(targetTapCount, taps);
+                }
+            }
+        }
+        else if (hrtf)
         {
             std::lock_guard queryLock(hrtf->queryMutex);
             for (std::size_t source = 0; source < 2; source++)
@@ -457,6 +574,7 @@ struct Spatializer::Impl final
         {
             activeProfile = std::move(selection->profile);
             hrtf = std::move(selection->hrtf);
+            filtersInitialized = false;
         }
 
         const auto requested = static_cast<Mode>(requestedMode.load(std::memory_order_relaxed));
@@ -499,7 +617,9 @@ struct Spatializer::Impl final
             requestedStageWidth.load(std::memory_order_relaxed),
             smoothing);
 
-        const float roomAmount = requestedRoomReflection.load(std::memory_order_relaxed);
+        const float roomAmount = (activeProfile && activeProfile->IsBrir())
+            ? 0.0f
+            : requestedRoomReflection.load(std::memory_order_relaxed);
         const float hrtfBlend = requestedHrtfBlend.load(std::memory_order_relaxed);
         for (std::size_t frame = 0; frame < frameCount; frame++)
         {

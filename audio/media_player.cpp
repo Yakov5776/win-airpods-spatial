@@ -75,6 +75,19 @@ public:
         ambienceSpatializer_.SetStageWidth(120.0f);
         ambienceSpatializer_.SetRoomReflection(settings.roomReflection * 0.5f);
         atmosPanner_.SetSettings(settings.atmosPanner);
+
+        auto initialProfile = hrtfProfile_.load(std::memory_order_relaxed);
+        if (initialProfile)
+        {
+            spatializer_.SetHrtfProfile(initialProfile);
+            ambienceSpatializer_.SetHrtfProfile(initialProfile);
+            atmosPanner_.SetHrtfProfile(initialProfile);
+            activeHrtfProfile_ = std::move(initialProfile);
+        }
+        const float initialBlend = hrtfBlend_.load(std::memory_order_relaxed);
+        spatializer_.SetHrtfBlend(initialBlend);
+        ambienceSpatializer_.SetHrtfBlend(initialBlend);
+        atmosPanner_.SetHrtfBlend(initialBlend);
     }
 
     static void DataCallback(
@@ -248,11 +261,13 @@ private:
             {
                 spatializer_.SetHrtfProfile(selectedProfile);
                 ambienceSpatializer_.SetHrtfProfile(selectedProfile);
+                atmosPanner_.SetHrtfProfile(selectedProfile);
                 activeHrtfProfile_ = std::move(selectedProfile);
             }
             const float hrtfBlend = hrtfBlend_.load(std::memory_order_relaxed);
             spatializer_.SetHrtfBlend(hrtfBlend);
             ambienceSpatializer_.SetHrtfBlend(hrtfBlend);
+            atmosPanner_.SetHrtfBlend(hrtfBlend);
 
             spatializer_.Process(
                 inputLeft_.data(),
@@ -298,6 +313,19 @@ private:
 
     void RenderCavernAtmos(float* output, ma_uint32 frameCount)
     {
+        auto selectedProfile = hrtfProfile_.load(std::memory_order_relaxed);
+        if (selectedProfile != activeHrtfProfile_)
+        {
+            spatializer_.SetHrtfProfile(selectedProfile);
+            ambienceSpatializer_.SetHrtfProfile(selectedProfile);
+            atmosPanner_.SetHrtfProfile(selectedProfile);
+            activeHrtfProfile_ = std::move(selectedProfile);
+        }
+        const float hrtfBlend = hrtfBlend_.load(std::memory_order_relaxed);
+        spatializer_.SetHrtfBlend(hrtfBlend);
+        ambienceSpatializer_.SetHrtfBlend(hrtfBlend);
+        atmosPanner_.SetHrtfBlend(hrtfBlend);
+
         std::size_t renderedFrames = 0;
         while (renderedFrames < frameCount)
         {

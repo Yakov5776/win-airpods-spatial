@@ -1,8 +1,10 @@
 #pragma once
 
 #include "cavern_object_stream.hpp"
+#include "spatializer.hpp"
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 namespace MagicAapSpatial
@@ -27,6 +29,9 @@ class AtmosPanner final
 public:
     explicit AtmosPanner(AtmosPannerSettings settings = {});
     void SetSettings(AtmosPannerSettings settings);
+    void SetHrtfProfile(std::shared_ptr<const HrtfProfile> profile);
+    void SetHrtfBlend(float blend);
+    void Reset();
 
     void Process(
         const CavernObjectBlock& block,
@@ -38,5 +43,9 @@ public:
 
 private:
     AtmosPannerSettings settings_;
+    std::shared_ptr<const HrtfProfile> hrtfProfile_;
+    float hrtfBlend_ = 0.85f;
+    std::vector<float> tailLeft_;
+    std::vector<float> tailRight_;
 };
 }

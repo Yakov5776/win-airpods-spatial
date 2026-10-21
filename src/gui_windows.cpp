@@ -135,31 +135,29 @@ std::filesystem::path ExecutableDirectory()
     return std::filesystem::path(std::wstring(path.data(), length)).parent_path();
 }
 
-void AddHrtfPath(PlayerWindow& app, const std::filesystem::path& path)
+struct BuiltinHrtfPreset
+{
+    const wchar_t* displayName;
+    const wchar_t* filename;
+};
+
+constexpr std::array<BuiltinHrtfPreset, 6> kBuiltinApplePresets{{
+    { L"Apple Spatial - General (HRIR)", L"HRIR_General.sofa" },
+    { L"Apple Spatial - Cinema (HRIR)", L"HRIR_Movie.sofa" },
+    { L"Apple Spatial - Studio Room 2026 (BRIR)", L"BRIR_General_2026.sofa" },
+    { L"Apple Spatial - Cinema Room 2026 (BRIR)", L"BRIR_Movie_2026.sofa" },
+    { L"Apple Spatial - FaceTime Room (BRIR)", L"BRIR_FT.sofa" },
+    { L"Apple Spatial - APAC BCM (BRIR)", L"BRIR_APAC_BCM.sofa" },
+}};
+
+void AddBuiltinHrtfPreset(PlayerWindow& app, const wchar_t* displayName, const std::filesystem::path& path)
 {
     const auto normalized = path.lexically_normal();
-    const auto found = std::find(app.hrtfPaths.begin(), app.hrtfPaths.end(), normalized);
-    if (found != app.hrtfPaths.end())
-    {
-        SendMessageW(app.hrtfProfile, CB_SETCURSEL,
-            static_cast<WPARAM>(std::distance(app.hrtfPaths.begin(), found)), 0);
-        return;
-    }
-
-    std::wstring profileName = normalized.stem().wstring();
-    constexpr std::wstring_view sadieSuffix = L"_48K_24bit_256tap_FIR_SOFA";
-    if (const auto suffix = profileName.find(sadieSuffix); suffix != std::wstring::npos)
-    {
-        profileName.resize(suffix);
-    }
-    const std::wstring label = normalized.parent_path().filename().wstring() +
-        L" / " + profileName;
     const auto index = SendMessageW(
-        app.hrtfProfile, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        app.hrtfProfile, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(displayName));
     if (index == CB_ERR || index == CB_ERRSPACE) return;
     app.hrtfPaths.push_back(normalized);
     app.loadedHrtfProfiles.emplace_back();
-    SendMessageW(app.hrtfProfile, CB_SETCURSEL, static_cast<WPARAM>(index), 0);
 }
 
 bool SelectHrtfProfile(PlayerWindow& app, int index)
@@ -180,66 +178,51 @@ bool SelectHrtfProfile(PlayerWindow& app, int index)
     }
 
     app.player.SetHrtfProfile(profile);
-    SetStatus(app, std::wstring(L"HRTF switched: ") +
+    SetStatus(app, std::wstring(L"HRTF profile: ") +
         app.hrtfPaths[static_cast<std::size_t>(index)].filename().wstring());
     return true;
 }
 
 void PopulateHrtfProfiles(PlayerWindow& app)
 {
-    const auto assetDirectory = ExecutableDirectory() / "assets";
-    std::vector<std::filesystem::path> paths;
     std::error_code error;
-    for (std::filesystem::recursive_directory_iterator iterator(
-             assetDirectory, std::filesystem::directory_options::skip_permission_denied, error),
-         end;
-         iterator != end;
-         iterator.increment(error))
+    const auto exeDir = ExecutableDirectory();
+    const auto workDir = std::filesystem::current_path(error);
+
+    for (const auto& preset : kBuiltinApplePresets)
     {
-        if (error)
+        std::vector<std::filesystem::path> candidates;
+        if (!exeDir.empty())
+        {
+            candidates.push_back(exeDir / "assets" / "apple" / preset.filename);
+            candidates.push_back(exeDir / "assets" / preset.filename);
+            candidates.push_back(exeDir / preset.filename);
+        }
+        if (!error)
+        {
+            candidates.push_back(workDir / "assets" / "apple" / preset.filename);
+            candidates.push_back(workDir / "audio" / "assets" / "apple" / preset.filename);
+            candidates.push_back(workDir / "win-airpods-spatial-main" / "audio" / "assets" / "apple" / preset.filename);
+            candidates.push_back(workDir / "sofa" / preset.filename);
+            candidates.push_back(workDir / "assets" / preset.filename);
+        }
+
+        for (const auto& cand : candidates)
         {
             error.clear();
-            continue;
-        }
-        if (iterator->is_regular_file(error) && iterator->path().extension() == L".sofa")
-        {
-            paths.push_back(iterator->path());
+            if (std::filesystem::is_regular_file(cand, error) && !error)
+            {
+                AddBuiltinHrtfPreset(app, preset.displayName, cand);
+                break;
+            }
         }
     }
 
-    std::sort(paths.begin(), paths.end());
-    const auto defaultPath = assetDirectory / "MIT_KEMAR_normal_pinna.sofa";
-    const auto defaultProfile = std::find(paths.begin(), paths.end(), defaultPath);
-    if (defaultProfile != paths.end())
-    {
-        std::rotate(paths.begin(), defaultProfile, std::next(defaultProfile));
-    }
-    for (const auto& path : paths)
-    {
-        AddHrtfPath(app, path);
-    }
     if (!app.hrtfPaths.empty())
     {
         SendMessageW(app.hrtfProfile, CB_SETCURSEL, 0, 0);
         SelectHrtfProfile(app, 0);
     }
-}
-
-void BrowseForHrtfProfile(PlayerWindow& app)
-{
-    wchar_t path[MAX_PATH * 4]{};
-    OPENFILENAMEW dialog{};
-    dialog.lStructSize = sizeof(dialog);
-    dialog.hwndOwner = app.window;
-    dialog.lpstrFilter = L"SOFA HRTF profiles\0*.sofa\0All files\0*.*\0";
-    dialog.lpstrFile = path;
-    dialog.nMaxFile = static_cast<DWORD>(std::size(path));
-    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    dialog.lpstrTitle = L"Select an HRTF profile";
-    if (!GetOpenFileNameW(&dialog)) return;
-
-    AddHrtfPath(app, path);
-    SelectHrtfProfile(app, static_cast<int>(SendMessageW(app.hrtfProfile, CB_GETCURSEL, 0, 0)));
 }
 
 HWND AddControl(
@@ -311,19 +294,9 @@ void CreateControls(PlayerWindow& app)
         CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
         400,
         274,
-        210,
-        180,
+        320,
+        200,
         kHrtfProfileId);
-    AddControl(
-        app.window,
-        L"BUTTON",
-        L"Browse...",
-        BS_PUSHBUTTON | WS_TABSTOP,
-        618,
-        274,
-        102,
-        32,
-        kHrtfBrowseId);
     PopulateHrtfProfiles(app);
     SetStatus(app, L"Choose a file to begin.");
 
@@ -566,9 +539,6 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         {
         case kBrowseId:
             BrowseForFile(*app);
-            return 0;
-        case kHrtfBrowseId:
-            BrowseForHrtfProfile(*app);
             return 0;
         case kHrtfProfileId:
             if (HIWORD(wParam) == CBN_SELCHANGE)

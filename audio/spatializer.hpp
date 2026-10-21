@@ -20,6 +20,8 @@ struct Pose
     float rollDegrees = 0.0f;
 };
 
+class AtmosPanner;
+
 class HrtfProfile final
 {
 public:
@@ -28,6 +30,14 @@ public:
         float sampleRate = 48000.0f);
 
     const std::filesystem::path& Path() const noexcept;
+    bool IsBrir() const noexcept;
+    int FilterLength() const noexcept;
+
+    bool Evaluate(
+        float x, float y, float z,
+        float* leftFilter, float* rightFilter,
+        std::size_t maxTaps,
+        std::size_t& outTapCount) const;
 
 private:
     struct Impl;
@@ -35,6 +45,7 @@ private:
     std::shared_ptr<Impl> impl_;
 
     friend class Spatializer;
+    friend class AtmosPanner;
 };
 
 class Spatializer final
