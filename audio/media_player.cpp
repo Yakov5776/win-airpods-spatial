@@ -22,6 +22,14 @@ namespace
 constexpr ma_uint32 kSampleRate = 48000;
 constexpr ma_uint32 kCallbackChunkFrames = 2048;
 
+float SoftLimit(float value)
+{
+    const float magnitude = std::abs(value);
+    if (magnitude <= 0.85f) return value;
+    const float limited = 0.85f + 0.15f * std::tanh((magnitude - 0.85f) / 0.15f);
+    return std::copysign(limited, value);
+}
+
 bool UsesMiniaudioDecoder(const std::filesystem::path& path, bool forceChannelBed)
 {
     if (forceChannelBed) return false;
@@ -292,8 +300,8 @@ private:
             {
                 const float ambientLeft = settings_.channelBedMode ? ambienceOutputLeft_[index] : 0.0f;
                 const float ambientRight = settings_.channelBedMode ? ambienceOutputRight_[index] : 0.0f;
-                output[(renderedFrames + index) * 2] = outputLeft_[index] + ambientLeft;
-                output[(renderedFrames + index) * 2 + 1] = outputRight_[index] + ambientRight;
+                output[(renderedFrames + index) * 2] = SoftLimit(outputLeft_[index] + ambientLeft);
+                output[(renderedFrames + index) * 2 + 1] = SoftLimit(outputRight_[index] + ambientRight);
             }
             renderedFrames += static_cast<ma_uint32>(frames);
             if (decodedFrames < chunkFrames)
@@ -353,8 +361,8 @@ private:
             const auto count = std::min<std::size_t>(available, frameCount - renderedFrames);
             for (std::size_t index = 0; index < count; index++)
             {
-                output[(renderedFrames + index) * 2] = objectOutputLeft_[objectBlockPosition_ + index];
-                output[(renderedFrames + index) * 2 + 1] = objectOutputRight_[objectBlockPosition_ + index];
+                output[(renderedFrames + index) * 2] = SoftLimit(objectOutputLeft_[objectBlockPosition_ + index]);
+                output[(renderedFrames + index) * 2 + 1] = SoftLimit(objectOutputRight_[objectBlockPosition_ + index]);
             }
             renderedFrames += count;
             objectBlockPosition_ += count;
@@ -412,14 +420,13 @@ int MediaPlayer::PlayFile(
     std::optional<std::filesystem::path> decodedPath;
     if (!settings.cavernAtmosObjects && !UsesMiniaudioDecoder(path, settings.channelBedMode))
     {
-        settings.channelBedMode = true;
         try
         {
-            decodedPath = DecodeChannelBedToTemporaryWav(path);
+            decodedPath = DecodeToTemporaryWav(path, settings.channelBedMode);
         }
         catch (const std::exception& error)
         {
-            std::cerr << "Could not decode E-AC-3 channel bed: " << error.what() << '\n';
+            std::cerr << "Could not decode media file: " << error.what() << '\n';
             return 2;
         }
     }

@@ -28,7 +28,6 @@ namespace MagicAapSpatial
 namespace
 {
 constexpr int kOutputRate = 48000;
-constexpr int kOutputChannels = 4;
 constexpr int kFloatBits = 32;
 std::atomic_uint64_t g_tempSequence{0};
 
@@ -92,23 +91,23 @@ void WriteU32(std::ostream& output, std::uint32_t value)
     WriteU16(output, static_cast<std::uint16_t>(value >> 16));
 }
 
-void WriteWaveHeader(std::ostream& output, std::uint32_t dataBytes)
+void WriteWaveHeader(std::ostream& output, std::uint32_t dataBytes, int outputChannels)
 {
     output.write("RIFF", 4);
     WriteU32(output, 36 + dataBytes);
     output.write("WAVEfmt ", 8);
     WriteU32(output, 16);
     WriteU16(output, 3);
-    WriteU16(output, kOutputChannels);
+    WriteU16(output, static_cast<std::uint16_t>(outputChannels));
     WriteU32(output, kOutputRate);
-    WriteU32(output, kOutputRate * kOutputChannels * sizeof(float));
-    WriteU16(output, kOutputChannels * sizeof(float));
+    WriteU32(output, static_cast<std::uint32_t>(kOutputRate * outputChannels * sizeof(float)));
+    WriteU16(output, static_cast<std::uint16_t>(outputChannels * sizeof(float)));
     WriteU16(output, kFloatBits);
     output.write("data", 4);
     WriteU32(output, dataBytes);
 }
 
-std::array<double, kOutputChannels> CoefficientsFor(AVChannel channel)
+std::array<double, 4> CoefficientsFor4Ch(AVChannel channel)
 {
     switch (channel)
     {
@@ -126,6 +125,24 @@ std::array<double, kOutputChannels> CoefficientsFor(AVChannel channel)
     }
 }
 
+std::array<double, 2> CoefficientsForStereo(AVChannel channel)
+{
+    switch (channel)
+    {
+    case AV_CHAN_FRONT_LEFT: return {1.0, 0.0};
+    case AV_CHAN_FRONT_RIGHT: return {0.0, 1.0};
+    case AV_CHAN_FRONT_CENTER: return {0.70710678, 0.70710678};
+    case AV_CHAN_LOW_FREQUENCY: return {0.5, 0.5};
+    case AV_CHAN_BACK_LEFT:
+    case AV_CHAN_SIDE_LEFT:
+    case AV_CHAN_FRONT_LEFT_OF_CENTER: return {0.70710678, 0.0};
+    case AV_CHAN_BACK_RIGHT:
+    case AV_CHAN_SIDE_RIGHT:
+    case AV_CHAN_FRONT_RIGHT_OF_CENTER: return {0.0, 0.70710678};
+    default: return {0.5, 0.5};
+    }
+}
+
 std::string Utf8Path(const std::filesystem::path& path)
 {
     const auto encoded = path.u8string();
@@ -135,13 +152,14 @@ std::string Utf8Path(const std::filesystem::path& path)
 void DecodeFrames(
     FfmpegState& state,
     std::ostream& output,
-    std::uint64_t& totalDataBytes)
+    std::uint64_t& totalDataBytes,
+    int outputChannels)
 {
     const int capacity = swr_get_out_samples(state.resampler, state.frame->nb_samples);
     if (capacity <= 0) return;
-    std::vector<float> stereo(static_cast<std::size_t>(capacity) * kOutputChannels);
+    std::vector<float> pcm(static_cast<std::size_t>(capacity) * outputChannels);
     std::uint8_t* outputPlanes[] = {
-        reinterpret_cast<std::uint8_t*>(stereo.data())};
+        reinterpret_cast<std::uint8_t*>(pcm.data())};
     const auto** inputPlanes = const_cast<const std::uint8_t**>(state.frame->extended_data);
     const int converted = swr_convert(
         state.resampler,
@@ -149,25 +167,29 @@ void DecodeFrames(
         capacity,
         inputPlanes,
         state.frame->nb_samples);
-    CheckAv(converted, "Resample decoded E-AC-3 audio");
-    const auto bytes = static_cast<std::size_t>(converted) * kOutputChannels * sizeof(float);
-    output.write(reinterpret_cast<const char*>(stereo.data()), static_cast<std::streamsize>(bytes));
+    CheckAv(converted, "Resample decoded audio");
+    const auto bytes = static_cast<std::size_t>(converted) * outputChannels * sizeof(float);
+    output.write(reinterpret_cast<const char*>(pcm.data()), static_cast<std::streamsize>(bytes));
     totalDataBytes += bytes;
 }
 
-void FlushResampler(FfmpegState& state, std::ostream& output, std::uint64_t& totalDataBytes)
+void FlushResampler(
+    FfmpegState& state,
+    std::ostream& output,
+    std::uint64_t& totalDataBytes,
+    int outputChannels)
 {
     while (true)
     {
         const int capacity = swr_get_out_samples(state.resampler, 0);
         if (capacity <= 0) return;
-        std::vector<float> stereo(static_cast<std::size_t>(capacity) * kOutputChannels);
-        std::uint8_t* outputPlanes[] = {reinterpret_cast<std::uint8_t*>(stereo.data())};
+        std::vector<float> pcm(static_cast<std::size_t>(capacity) * outputChannels);
+        std::uint8_t* outputPlanes[] = {reinterpret_cast<std::uint8_t*>(pcm.data())};
         const int converted = swr_convert(state.resampler, outputPlanes, capacity, nullptr, 0);
-        CheckAv(converted, "Flush channel-bed resampler");
+        CheckAv(converted, "Flush audio resampler");
         if (converted == 0) return;
-        const auto bytes = static_cast<std::size_t>(converted) * kOutputChannels * sizeof(float);
-        output.write(reinterpret_cast<const char*>(stereo.data()), static_cast<std::streamsize>(bytes));
+        const auto bytes = static_cast<std::size_t>(converted) * outputChannels * sizeof(float);
+        output.write(reinterpret_cast<const char*>(pcm.data()), static_cast<std::streamsize>(bytes));
         totalDataBytes += bytes;
     }
 }
@@ -175,20 +197,23 @@ void FlushResampler(FfmpegState& state, std::ostream& output, std::uint64_t& tot
 void DrainDecoder(
     FfmpegState& state,
     std::ostream& output,
-    std::uint64_t& totalDataBytes)
+    std::uint64_t& totalDataBytes,
+    int outputChannels)
 {
     while (true)
     {
         const int result = avcodec_receive_frame(state.codec, state.frame);
         if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return;
-        CheckAv(result, "Decode E-AC-3 frame");
-        DecodeFrames(state, output, totalDataBytes);
+        CheckAv(result, "Decode audio frame");
+        DecodeFrames(state, output, totalDataBytes, outputChannels);
         av_frame_unref(state.frame);
     }
 }
-}
+} // namespace
 
-std::filesystem::path DecodeChannelBedToTemporaryWav(const std::filesystem::path& sourcePath)
+std::filesystem::path DecodeToTemporaryWav(
+    const std::filesystem::path& sourcePath,
+    bool channelBedMode)
 {
     FfmpegState state;
     const auto source = Utf8Path(sourcePath);
@@ -224,22 +249,35 @@ std::filesystem::path DecodeChannelBedToTemporaryWav(const std::filesystem::path
         av_channel_layout_default(&inputLayout, channels);
     }
     const int channelCount = inputLayout.nb_channels;
-    if (channelCount < 2 || channelCount > 18)
+    if (channelCount < 1 || channelCount > 18)
     {
         av_channel_layout_uninit(&inputLayout);
-        throw std::runtime_error("E-AC-3 channel-bed mode requires a 2- to 18-channel decoded stream.");
+        throw std::runtime_error("Audio decoding requires a 1- to 18-channel stream.");
     }
 
+    const int outputChannels = channelBedMode ? 4 : 2;
     AVChannelLayout outputLayout{};
-    av_channel_layout_default(&outputLayout, kOutputChannels);
-    std::array<double, kOutputChannels * 18> matrix{};
+    av_channel_layout_default(&outputLayout, outputChannels);
+    std::vector<double> matrix(static_cast<std::size_t>(outputChannels * channelCount), 0.0);
     const double normalization = channelCount > 2 ? 0.75 : 1.0;
     for (int input = 0; input < channelCount; input++)
     {
-        const auto coefficients = CoefficientsFor(av_channel_layout_channel_from_index(&inputLayout, input));
-        for (int output = 0; output < kOutputChannels; output++)
+        const auto inChannel = av_channel_layout_channel_from_index(&inputLayout, input);
+        if (outputChannels == 4)
         {
-            matrix[output * channelCount + input] = coefficients[output] * normalization;
+            const auto coefficients = CoefficientsFor4Ch(inChannel);
+            for (int out = 0; out < 4; out++)
+            {
+                matrix[static_cast<std::size_t>(out * channelCount + input)] = coefficients[out] * normalization;
+            }
+        }
+        else
+        {
+            const auto coefficients = CoefficientsForStereo(inChannel);
+            for (int out = 0; out < 2; out++)
+            {
+                matrix[static_cast<std::size_t>(out * channelCount + input)] = coefficients[out] * normalization;
+            }
         }
     }
     CheckAv(swr_alloc_set_opts2(
@@ -251,11 +289,11 @@ std::filesystem::path DecodeChannelBedToTemporaryWav(const std::filesystem::path
         state.codec->sample_fmt,
         state.codec->sample_rate,
         0,
-        nullptr), "Configure channel-bed resampler");
+        nullptr), "Configure audio resampler");
     av_channel_layout_uninit(&inputLayout);
     av_channel_layout_uninit(&outputLayout);
-    CheckAv(swr_set_matrix(state.resampler, matrix.data(), channelCount), "Configure channel-bed downmix");
-    CheckAv(swr_init(state.resampler), "Initialize channel-bed resampler");
+    CheckAv(swr_set_matrix(state.resampler, matrix.data(), channelCount), "Configure audio downmix");
+    CheckAv(swr_init(state.resampler), "Initialize audio resampler");
 
     state.packet = av_packet_alloc();
     state.frame = av_frame_alloc();
@@ -271,7 +309,7 @@ std::filesystem::path DecodeChannelBedToTemporaryWav(const std::filesystem::path
     TemporaryFileCleanup cleanup{temporaryPath};
     std::ofstream output(temporaryPath, std::ios::binary | std::ios::trunc);
     if (!output) throw std::runtime_error("Could not create temporary decoded audio file.");
-    WriteWaveHeader(output, 0);
+    WriteWaveHeader(output, 0, outputChannels);
 
     std::uint64_t totalDataBytes = 0;
     int readResult = 0;
@@ -279,35 +317,45 @@ std::filesystem::path DecodeChannelBedToTemporaryWav(const std::filesystem::path
     {
         if (state.packet->stream_index == audioStream)
         {
-            CheckAv(avcodec_send_packet(state.codec, state.packet), "Submit E-AC-3 packet");
-            DrainDecoder(state, output, totalDataBytes);
+            CheckAv(avcodec_send_packet(state.codec, state.packet), "Submit audio packet");
+            DrainDecoder(state, output, totalDataBytes, outputChannels);
         }
         av_packet_unref(state.packet);
     }
     if (readResult != AVERROR_EOF) CheckAv(readResult, "Read encoded audio packet");
-    CheckAv(avcodec_send_packet(state.codec, nullptr), "Flush E-AC-3 decoder");
-    DrainDecoder(state, output, totalDataBytes);
-    FlushResampler(state, output, totalDataBytes);
+    CheckAv(avcodec_send_packet(state.codec, nullptr), "Flush audio decoder");
+    DrainDecoder(state, output, totalDataBytes, outputChannels);
+    FlushResampler(state, output, totalDataBytes, outputChannels);
 
     if (totalDataBytes == 0 || totalDataBytes > UINT32_MAX - 36)
     {
-        throw std::runtime_error("The decoded channel bed is empty or too large for temporary WAV output.");
+        throw std::runtime_error("The decoded audio is empty or too large for temporary WAV output.");
     }
     output.seekp(0, std::ios::beg);
-    WriteWaveHeader(output, static_cast<std::uint32_t>(totalDataBytes));
+    WriteWaveHeader(output, static_cast<std::uint32_t>(totalDataBytes), outputChannels);
     output.close();
     cleanup.keep = true;
     return temporaryPath;
 }
+
+std::filesystem::path DecodeChannelBedToTemporaryWav(const std::filesystem::path& sourcePath)
+{
+    return DecodeToTemporaryWav(sourcePath, true);
 }
+} // namespace MagicAapSpatial
 #else
 #include <stdexcept>
 
 namespace MagicAapSpatial
 {
+std::filesystem::path DecodeToTemporaryWav(const std::filesystem::path&, bool)
+{
+    throw std::runtime_error("Media decoding for this format requires the FFmpeg libraries.");
+}
+
 std::filesystem::path DecodeChannelBedToTemporaryWav(const std::filesystem::path&)
 {
-    throw std::runtime_error("E-AC-3 channel-bed decoding requires the FFmpeg libraries.");
+    throw std::runtime_error("Channel-bed decoding requires the FFmpeg libraries.");
 }
-}
+} // namespace MagicAapSpatial
 #endif

@@ -30,10 +30,18 @@ namespace
 {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kMetersPerSofaRadius = 1.4f;
-constexpr float kSpatialGain = 0.84f;
+constexpr float kSpatialGain = 0.62f;
 constexpr std::size_t kMaximumHrtfTaps = 2048;
 constexpr float kRoomDecaySeconds = 0.38f;
 constexpr const char* kHrtfFilename = "apple/HRIR_General.sofa";
+
+float SoftLimit(float value)
+{
+    const float magnitude = std::abs(value);
+    if (magnitude <= 0.85f) return value;
+    const float limited = 0.85f + 0.15f * std::tanh((magnitude - 0.85f) / 0.15f);
+    return std::copysign(limited, value);
+}
 
 float WrapDegrees(float value)
 {
@@ -662,8 +670,8 @@ struct Spatializer::Impl final
             const auto wet = room.Process(directLeft, directRight);
             const float spatialOutLeft = directLeft + roomAmount * wet[0];
             const float spatialOutRight = directRight + roomAmount * wet[1];
-            outputLeft[frame] = inputLeft[frame] + hrtfBlend * (spatialOutLeft - inputLeft[frame]);
-            outputRight[frame] = inputRight[frame] + hrtfBlend * (spatialOutRight - inputRight[frame]);
+            outputLeft[frame] = SoftLimit(inputLeft[frame] + hrtfBlend * (spatialOutLeft - inputLeft[frame]));
+            outputRight[frame] = SoftLimit(inputRight[frame] + hrtfBlend * (spatialOutRight - inputRight[frame]));
             historyIndex = (historyIndex + 1) % kMaximumHrtfTaps;
         }
     }
